@@ -8,7 +8,8 @@ from caiman.mmapping import load_memmap
 from caiman.summary_images import local_correlations
 from skimage.measure import label, regionprops
 from scipy.ndimage import center_of_mass
-
+from skimage.transform import resize
+import warnings
 
 # ---------- Utility: Save image or plot ----------
 def save_image(arr, name, output_dir, cmap='gray', show_live=False):
@@ -96,37 +97,30 @@ class CNMFWrapper:
         save_image(Cn, "02_local_correlations", self.output_dir, show_live=False)
 
         Yr = self.cnmf.preprocess(Yr)
-        save_image(self.cnmf.estimates.sn.reshape(self.dims), "03_noise_std_estimate", self.output_dir)
+        sn = self.cnmf.estimates.sn
+        if sn.size == np.prod(self.dims):
+            save_image(sn.reshape(self.dims), "03_noise_std_estimate", self.output_dir)
+        else:
+            print(f"⚠️ Warning: Unexpected size of sn ({sn.size}); expected {np.prod(self.dims)}. Skipping noise std image.")
 
         self.cnmf.dims = self.dims
+
         def debug_show_patch_with_rois(coords, roi_masks, title=''):
             show_patch_on_mean_image(Y_avg, coords, roi_masks=roi_masks, title=title)
+
         self.cnmf._debug_show_patch = debug_show_patch_with_rois
 
         self.cnmf.fit_file(self.mmap_path)
 
+        A_final = self.cnmf.estimates.A.toarray().reshape((*self.dims, -1), order='F')
 
-        # >>> כאן תכניס את הקוד הבא:
-        A_initial = self.cnmf.estimates.Ab.toarray().reshape((*self.dims, -1), order='F')  # לפני המיזוג
-        A_final = self.cnmf.estimates.A.toarray().reshape((*self.dims, -1), order='F')     # אחרי המיזוג
-
-        # שמור תווית לכל שכבה
-        label_img_initial = np.zeros(self.dims, dtype=np.uint16)
         label_img_final = np.zeros(self.dims, dtype=np.uint16)
-
-        for i in range(A_initial.shape[-1]):
-            mask = A_initial[:, :, i] > 0
-            label_img_initial[mask & (label_img_initial == 0)] = i + 1
-
         for i in range(A_final.shape[-1]):
             mask = A_final[:, :, i] > 0
             label_img_final[mask & (label_img_final == 0)] = i + 1
 
-        # שמור כתמונות PNG – תוכל גם להעלות לנפארי אח"כ
-        save_image(label_img_initial, "06_labels_before_merge", self.output_dir, cmap='viridis')
-        save_image(label_img_final,   "07_labels_after_merge",  self.output_dir, cmap='viridis')
+        save_image(label_img_final, "06_labels_after_merge", self.output_dir, cmap='viridis')
 
-        A_final = self.cnmf.estimates.A.toarray().reshape((*self.dims, -1), order='F')
         C_final = self.cnmf.estimates.C
 
         for i in range(A_final.shape[-1]):
@@ -138,9 +132,10 @@ class CNMFWrapper:
         for i in range(A_final.shape[-1]):
             mask = A_final[:, :, i] > 0
             pix_indices = np.where(mask.flatten(order='F'))[0]
-            Y_roi = Yr_full[pix_indices, :]  
+            Y_roi = Yr_full[pix_indices, :]
             mean_trace = Y_roi.mean(axis=0)
             save_image(mean_trace, f"10_Y_mean_trace_{i}", self.output_dir)
+
         b_spatial = self.cnmf.estimates.b.reshape((*self.dims, -1), order='F')
         for j in range(b_spatial.shape[-1]):
             save_image(b_spatial[:, :, j], f"11_background_b_{j}", self.output_dir)
@@ -159,13 +154,8 @@ class CNMFWrapper:
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
-    import os
-    import numpy as np
-    from tifffile import imread
-    from caiman.source_extraction.cnmf import cnmf, params
-
     file_path = os.path.join(os.path.dirname(__file__), '20250409_3_Glut_1mM', '20250409_3_Glut_1mM_TIF_VIDEO.TIF')
-    Y = imread(file_path) 
+    Y = imread(file_path)
     Y = Y[:10]
     T, d1, d2 = Y.shape
     dims = (d1, d2)
@@ -177,12 +167,11 @@ if __name__ == "__main__":
     mmap_path = os.path.join(output_dir, mmap_base + '.mmap')
     npy_path = os.path.join(output_dir, mmap_base + '.npy')
 
-   
     np.save(npy_path, Y.astype(np.float32))
     fp = np.memmap(mmap_path, mode='w+', dtype=np.float32, shape=Y.size)
     fp[:] = Y.flatten(order='C')[:]
-    fp.flush()  # ✅ force it to write to disk
-    del fp  # ✅ close the memmap
+    fp.flush()
+    del fp
 
     opts = params.CNMFParams()
     opts.set('data', {
@@ -208,7 +197,6 @@ if __name__ == "__main__":
     opts.set('temporal', {'p': 1})
     opts.set('online', {'only_init': False})
 
-    # יצירת אובייקט CNMF
     cnm = cnmf.CNMF(n_processes=1, params=opts)
     cnm.debug_visualize = True
     cnm._debug_image = np.mean(Y, axis=0)
